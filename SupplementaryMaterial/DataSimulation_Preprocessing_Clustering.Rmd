@@ -1,0 +1,2695 @@
+---
+title: "DataSimulation_May"
+author: "Pauline"
+date: "10 5 2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, results='markup', fig.show="hold", out.width="33%")
+library(ggplot2)
+library(kohonen)
+library(vegan)
+library(tidyverse)
+library(dynamicTreeCut)
+library(NbClust)
+library(openxlsx)
+library(sf)
+library(spData)
+library(scatterpie)
+library(sp)
+library(skimr)
+library(truncnorm)
+#colours
+library(RColorBrewer)
+Clusters.col <- brewer.pal(n = 8, name = "Dark2")
+#define palette for plotting
+coolBlueHotRed <- function(n, alpha = 1){rainbow(n, end=4/6, alpha=alpha)[n:1]}
+```
+
+# Check out statisitics of ICCAT's task 2 to have an idea of range etc
+Method:
+First load task 2 df, and group by cell ID --> then select only xLon yLat columns
+```{r df}
+#load iccat dataset and get statistical info
+df <- read.xlsx("~/ETHZ/Master/Masterarbeit/TunaSOM/Data/t2ce_ETRO-PS1991-19_bySchool.xlsx", startRow = 7)
+df.fad <- df %>% filter(FishMode == "FAD")
+df <- df.fad %>% select(xLon, yLat, YearC, TimePeriodID, BET, YFT, SKJ, Eff2)
+ICCATsummary <- skim(df[,5:7]) %>% select(-skim_type, -numeric.hist, -complete_rate)
+knitr::kable(ICCATsummary)
+```
+
+# Random dataframe based on ICCAT's statistics(mean and sd)
+## Create empty dataframe with one row for each geographic cell and create columns of random catches
+```{r}
+#extract only cells
+df.cells <- df %>% mutate(cellID = group_indices(., xLon, yLat)) %>% select(cellID, xLon, yLat) %>% unique()
+
+#try out generating complete random numbers with same statistics as species
+#use truncnorm function to generate only positive numbers (set a=0, lower bound)
+set.seed(10000)
+df.random <- df.cells %>% mutate(
+  rBET = rtruncnorm(a = 0, n = 1226, mean = ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"], sd = ICCATsummary$numeric.sd[ICCATsummary$skim_variable=="BET"]), 
+  rYFT = rtruncnorm(a = 0, n = 1226, mean = ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="YFT"], sd = ICCATsummary$numeric.sd[ICCATsummary$skim_variable=="YFT"]), 
+  rSKJ = rtruncnorm(a = 0, n = 1226, mean = ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="SKJ"], sd = ICCATsummary$numeric.sd[ICCATsummary$skim_variable=="SKJ"])) %>% rowid_to_column(var = "obsID")
+
+#show statistics
+summary.random <- skim(df.random[,5:7]) %>% select(-skim_type,-numeric.hist,-n_missing, -complete_rate)
+knitr::kable(summary.random)
+```
+
+## Plot random catches in space
+```{r random_catches, echo =FALSE}
+#plot abundace of each species to see
+#BET
+ggplot() + geom_point(data = df.random, aes(x = xLon, y=yLat, size = (rBET/1000),), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="BET Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "Random BET catches")
+
+#YFT
+ggplot() + geom_point(data = df.random, aes(x = xLon, y=yLat, size = (rYFT/1000),), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="YFT Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "Random YFT catches")
+
+#SKJ
+ggplot() + geom_point(data = df.random, aes(x = xLon, y=yLat, size = (rSKJ/1000),), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14)) +
+    guides(size = guide_legend(title ="SKJ Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "Random SKJ catches")
+```
+
+## SOM analysis on these random, non-associated catches
+### SOM parameters
+```{r SOMhigh parameters, echo=TRUE}
+#get data in matrix shape
+data <- df.random[,5:7]
+data <- data.matrix(data)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r SOM, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 20000)
+```
+
+```{r output visu, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 20'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+#### Using Ward's criterion
+```{r clustering1, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.random <- df.random %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering1.visu, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){{plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}}
+
+#Boxplots
+##BET
+ggplot(data=df.random, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.random, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.random, aes(group = cluster.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.random <- df.random %>% group_by(cluster.Ward) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ))%>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(cluster.Ward, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.random)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.random, aes(x= "", y=summary.random[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.random, aes(x = xLon, y = yLat, color = as.factor(cluster.Ward), pch = as.factor(cluster.Ward))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with random catches", subtitle = "clustering: hclust + cutreeHybrid, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### Using UPGMA
+```{r clustering2, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="average")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.UPGMA = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.random <- df.random %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering2.visu, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+
+#BET
+ggplot(data=df.random, aes(group = cluster.UPGMA, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.random, aes(group = cluster.UPGMA, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.random, aes(group = cluster.UPGMA, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.random <- df.random %>% group_by(cluster.UPGMA) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(cluster.UPGMA, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.random)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.random, aes(x= "", y=summary.random[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.random, aes(x = xLon, y = yLat, color = as.factor(cluster.UPGMA), pch = as.factor(cluster.UPGMA))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot", subtitle = "clustering: hclust + cutreeHybrid, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+# Dataframe with one high abundance cluster of one species (BET)
+## Visualise where to put the high abundance cluster
+```{r visuhighab, echo = FALSE, out.width="100%"}
+df.random <- df.random %>% mutate(cellID.hor = group_indices(., yLat, xLon))
+
+#visual cellID repartition in space
+ggplot() + geom_point(data = df.random, aes(x = xLon, y=yLat), alpha = 0.5, col = "red")+
+  geom_point(data = df.random[df.random$cellID<400,], aes(x = xLon, y=yLat), alpha = 0.5, col = "midnightblue") +
+  geom_point(data = df.random[df.random$cellID>700,], aes(x = xLon, y=yLat), alpha = 0.5, col = "midnightblue") +
+  geom_point(data = df.random[df.random$cellID.hor<400,], aes(x = xLon, y=yLat), alpha = 0.5, col = "midnightblue") +
+  geom_point(data = df.random[df.random$cellID.hor>700,], aes(x = xLon, y=yLat), alpha = 0.5, col = "midnightblue") +
+    geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+    coord_sf(xlim= c(-35,15), ylim = c(-25,25))+ theme_minimal()+
+    theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14)) +
+  labs(title = "Sampling cells", subtitle = "High BET abundance cluster in red")
+```
+
+## Create high abundance cluster by modifying df.random
+```{r}
+set.seed(1000)
+df.highBET <- df.random %>% 
+  mutate(ab.BET = case_when(cellID %in% (400:700) & cellID.hor %in% (400:700) ~ "high", cellID < 400 & cellID.hor < 400 ~ "low", cellID < 400 & cellID.hor > 700 ~ "low", cellID > 700 & cellID.hor < 400 ~ "low", cellID > 700 & cellID.hor > 700 ~ "low", cellID < 400 ~ "low", cellID > 700 ~"low", cellID.hor < 400 ~ "low", cellID.hor > 700 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.BET == "high" ~ rBET + 15000, 
+                          ab.BET == "low" ~ rBET)) %>%
+  select(-node.x, -cluster.Ward, -node.y, -cluster.UPGMA)
+```
+
+### Plot scaled by catch sizes to check
+```{r, echo = FALSE, out.width = "100%"}
+ggplot() +
+  geom_point(data = df.highBET[df.highBET$ab.BET== "low",], aes(x = xLon, y=yLat, size = (rBET/1000)), alpha = 0.5, col = "midnightblue") +
+  geom_point(data = df.highBET[df.highBET$ab.BET == "high",], aes(x = xLon, y=yLat, size = (rBET/1000)), alpha = 0.5, col = "darkred") +
+    geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+    coord_sf(xlim= c(-35,15), ylim = c(-25,25))+ theme_minimal()+
+    theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14)) +
+  labs(title = "Sampling cells", subtitle = "High BET abundance in red") +
+    guides(size = guide_legend(title ="random BET catch (t)"))+
+  scale_size(range = c(0.1,3))
+```
+
+## SOM analysis
+### SOM parameters
+```{r SOM parameters highab, echo=TRUE}
+#get data in matrix shape
+data <- df.highBET[,5:7]
+data <- data.matrix(data)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r SOM highab, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 20000)
+```
+
+```{r output visu highab, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 20'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+#### Using Ward's criterion
+```{r clustering1highab, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET <- df.highBET %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering1.visu highab, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+
+#Boxplots
+##BET
+ggplot(data=df.highBET, aes(group = cluster.Ward.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.highBET, aes(group = cluster.Ward.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.highBET, aes(group = cluster.Ward.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET %>% group_by(cluster.Ward.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ))%>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(cluster.Ward.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET, aes(x = xLon, y = yLat, color = as.factor(cluster.Ward.high), pch = as.factor(cluster.Ward.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot", subtitle = "clustering: hclust + cutreeHybrid, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### Using UPGMA
+```{r clustering2.highab, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="average")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET <- df.highBET %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering2.visu highab, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+
+#BET
+ggplot(data=df.highBET, aes(group = cluster.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET, aes(group = cluster.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET, aes(group = cluster.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET %>% group_by(cluster.UPGMA.high) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(cluster.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET, aes(x = xLon, y = yLat, color = as.factor(cluster.UPGMA.high), pch = as.factor(cluster.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot", subtitle = "clustering: hclust + cutreeHybrid, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+##  Clustering using nbClust and descriptive statistics
+### Ward
+```{r clustering3.high, echo=TRUE}
+#method = average UPGMA
+codebook <- getCodes(som)
+nbclust.Ward <- NbClust(data = codebook, distance = "euclidean", method = "ward.D2", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.Ward$Best.partition])
+add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.Ward$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET <- df.highBET %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering3.visuhigh, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#BET
+ggplot(data=df.highBET, aes(group = nbclust.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET, aes(group = nbclust.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET, aes(group = nbclust.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET%>% group_by(nbclust.Ward) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(nbclust.Ward, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET, aes(x = xLon, y = yLat, color = as.factor(nbclust.Ward), pch = as.factor(nbclust.Ward))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot", subtitle = "clustering: nbClust, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### UPGMA
+```{r clustering4 highab, echo=TRUE}
+#method = average UPGMA
+nbclust.UPGMA.high <- NbClust(data = codebook, distance = "euclidean", method = "average", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(nbclust.UPGMA.high$Best.partition))
+add.cluster.boundaries(som, nbclust.UPGMA.high$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.UPGMA.high$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET <- df.highBET %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering4.visu highab, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.UPGMA.high$Best.partition)}
+
+#BET
+ggplot(data=df.highBET, aes(group = nbclust.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET, aes(group = nbclust.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET, aes(group = nbclust.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET %>% group_by(nbclust.UPGMA.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ)) %>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(nbclust.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+ print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET, aes(x = xLon, y = yLat, color = as.factor(nbclust.UPGMA.high), pch = as.factor(nbclust.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot", subtitle = "clustering: nbClust, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+# Same hotspot, but try centered and scaled data (SKJ shouldn't drive it all)
+## create df
+## Create high abundance cluster by modifying df.random, show stats
+```{r}
+df.highBET <- df.highBET[,1:9]
+
+#summary table
+summary.high <- skim(df.highBET[, 5:7]) %>% select(skim_variable, numeric.mean, numeric.sd, numeric.p0, numeric.p25, numeric.p50, numeric.p75, numeric.p100)
+knitr::kable(summary.high)
+```
+
+## SOM analysis
+### SOM parameters
+```{r SOM parameters CS, echo=TRUE}
+#get data in matrix shape
+data <- df.highBET[,5:7]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r SOM CS, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 20000)
+```
+
+```{r output visu CS, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 20'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+#### Using Ward's criterion
+```{r clustering1 CS, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[treecut$labels])
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET <- df.highBET %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering1.visu CS, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+
+#Boxplots
+##BET
+ggplot(data=df.highBET, aes(group = cluster.Ward.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.highBET, aes(group = cluster.Ward.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.highBET, aes(group = cluster.Ward.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET %>% group_by(cluster.Ward.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ))%>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(cluster.Ward.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET, aes(x = xLon, y = yLat, color = as.factor(cluster.Ward.high), pch = as.factor(cluster.Ward.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (CS)", subtitle = "clustering: hclust + cutreeHybrid, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### Using UPGMA
+```{r clustering2.high CS, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="average")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET <- df.highBET %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering2.visu CS, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+#BET
+ggplot(data=df.highBET, aes(group = cluster.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET, aes(group = cluster.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET, aes(group = cluster.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET %>% group_by(cluster.UPGMA.high) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(cluster.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET, aes(x = xLon, y = yLat, color = as.factor(cluster.UPGMA.high), pch = as.factor(cluster.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (CS)", subtitle = "clustering: hclust + cutreeHybrid, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+##  Clustering using nbClust and descriptive statistics
+### Ward
+```{r clustering3.high CS, echo=TRUE}
+#method = average UPGMA
+codebook <- getCodes(som)
+nbclust.Ward <- NbClust(data = codebook, distance = "euclidean", method = "ward.D2", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.Ward$Best.partition])
+add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.Ward$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET <- df.highBET %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering3.visuhigh CS, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#BET
+ggplot(data=df.highBET, aes(group = nbclust.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET, aes(group = nbclust.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET, aes(group = nbclust.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET%>% group_by(nbclust.Ward) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(nbclust.Ward, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET, aes(x = xLon, y = yLat, color = as.factor(nbclust.Ward), pch = as.factor(nbclust.Ward))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (CS)", subtitle = "clustering: nbclust, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### UPGMA
+```{r clustering4 CS, echo=TRUE}
+#method = average UPGMA
+nbclust.UPGMA <- NbClust(data = codebook, distance = "euclidean", method = "average", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.UPGMA$Best.partition])
+add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.UPGMA$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET <- df.highBET %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering4.visu CS, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#BET
+ggplot(data=df.highBET, aes(group = nbclust.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET, aes(group = nbclust.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET, aes(group = nbclust.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET %>% group_by(nbclust.UPGMA.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ)) %>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(nbclust.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET, aes(x = xLon, y = yLat, color = as.factor(nbclust.UPGMA.high), pch = as.factor(nbclust.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (CS)", subtitle = "clustering: nbclust, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+# Same hotspot, log-tansformed, centered and scaled data
+## create df
+## Create high abundance cluster by modifying df.random, show stats
+```{r}
+df.highBET.log <- df.highBET[,1:9] %>% mutate(rBET = log1p(rBET), rYFT = log1p(rYFT), rSKJ = log1p(rSKJ))
+
+#summary table
+summary.highlog <- skim(df.highBET.log[, 5:7]) %>% select(skim_variable, numeric.mean, numeric.sd, numeric.p0, numeric.p25, numeric.p50, numeric.p75, numeric.p100)
+knitr::kable(summary.highlog)
+```
+
+## SOM analysis
+### SOM parameters
+```{r SOM parameters logCS, echo=TRUE}
+#get data in matrix shape
+data <- df.highBET.log[,5:7]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r SOM logCS, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 20000)
+```
+
+```{r output visu logCS, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 20'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+#### Using Ward's criterion
+```{r clustering1 logCS, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[treecut$labels])
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET.log <- df.highBET.log %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering1.visu logCS, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+
+#Boxplots
+##BET
+ggplot(data=df.highBET.log, aes(group = cluster.Ward.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.highBET.log, aes(group = cluster.Ward.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.highBET.log, aes(group = cluster.Ward.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET.log %>% group_by(cluster.Ward.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ))%>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(cluster.Ward.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET.log, aes(x = xLon, y = yLat, color = as.factor(cluster.Ward.high), pch = as.factor(cluster.Ward.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (log and CS)", subtitle = "clustering: hclust + cutreeHybrid, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### Using UPGMA
+```{r clustering2.high logCS, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="average")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET.log <- df.highBET.log %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering2.visu logCS, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+#BET
+ggplot(data=df.highBET.log, aes(group = cluster.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET.log, aes(group = cluster.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET.log, aes(group = cluster.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET.log %>% group_by(cluster.UPGMA.high) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(cluster.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET.log, aes(x = xLon, y = yLat, color = as.factor(cluster.UPGMA.high), pch = as.factor(cluster.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (log and CS)", subtitle = "clustering: hclust + cutreeHybrid, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+##  Clustering using nbClust and descriptive statistics
+### Ward
+```{r clustering3.high logCS, echo=TRUE}
+#method = average UPGMA
+codebook <- getCodes(som)
+nbclust.Ward <- NbClust(data = codebook, distance = "euclidean", method = "ward.D2", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.Ward$Best.partition])
+add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.Ward$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET.log <- df.highBET.log %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering3.visuhigh logCS, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#BET
+ggplot(data=df.highBET.log, aes(group = nbclust.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET.log, aes(group = nbclust.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET.log, aes(group = nbclust.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET.log %>% group_by(nbclust.Ward) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(nbclust.Ward, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET.log, aes(x = xLon, y = yLat, color = as.factor(nbclust.Ward), pch = as.factor(nbclust.Ward))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (log and CS)", subtitle = "clustering: nbclust, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### UPGMA
+```{r clustering4 logCS, echo=TRUE}
+#method = average UPGMA
+nbclust.UPGMA <- NbClust(data = codebook, distance = "euclidean", method = "average", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.UPGMA$Best.partition])
+add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.UPGMA$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET.log <- df.highBET.log %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering4.visu logCS, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#BET
+ggplot(data=df.highBET.log, aes(group = nbclust.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET.log, aes(group = nbclust.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET.log, aes(group = nbclust.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET.log %>% group_by(nbclust.UPGMA.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ)) %>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(nbclust.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET.log, aes(x = xLon, y = yLat, color = as.factor(nbclust.UPGMA.high), pch = as.factor(nbclust.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (log and CS)", subtitle = "clustering: nbclust, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+# BET hotspot, log-transformed (not CS)
+## Create df
+```{r}
+df.highBET.log <- df.highBET[,1:9] %>% mutate(rBET = log1p(rBET), rYFT = log1p(rYFT), rSKJ = log1p(rSKJ))
+
+#summary table
+summary.highlog <- skim(df.highBET.log[, 5:7]) %>% select(skim_variable, numeric.mean, numeric.sd, numeric.p0, numeric.p25, numeric.p50, numeric.p75, numeric.p100)
+knitr::kable(summary.highlog)
+```
+
+## SOM analysis
+### SOM parameters
+```{r SOM parameters log, echo=TRUE}
+#get data in matrix shape
+data <- df.highBET.log[,5:7]
+data <- data.matrix(data)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r SOM log, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 20000)
+```
+
+```{r output visu log, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 20'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+#### Using Ward's criterion
+```{r clustering1 log, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[treecut$labels])
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET.log <- df.highBET.log %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering1.visu log, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+
+#Boxplots
+##BET
+ggplot(data=df.highBET.log, aes(group = cluster.Ward.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.highBET.log, aes(group = cluster.Ward.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.highBET.log, aes(group = cluster.Ward.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET.log %>% group_by(cluster.Ward.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ))%>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(cluster.Ward.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET.log, aes(x = xLon, y = yLat, color = as.factor(cluster.Ward.high), pch = as.factor(cluster.Ward.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (log)", subtitle = "clustering: hclust + cutreeHybrid, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### Using UPGMA
+```{r clustering2.high log, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="average")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET.log <- df.highBET.log %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering2.visu log, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+#BET
+ggplot(data=df.highBET.log, aes(group = cluster.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET.log, aes(group = cluster.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET.log, aes(group = cluster.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET.log %>% group_by(cluster.UPGMA.high) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(cluster.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET.log, aes(x = xLon, y = yLat, color = as.factor(cluster.UPGMA.high), pch = as.factor(cluster.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (log)", subtitle = "clustering: hclust + cutreeHybrid, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+##  Clustering using nbClust and descriptive statistics
+### Ward
+```{r clustering3.high log, echo=TRUE}
+#method = average UPGMA
+codebook <- getCodes(som)
+nbclust.Ward <- NbClust(data = codebook, distance = "euclidean", method = "ward.D2", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.Ward$Best.partition])
+add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.Ward$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET.log <- df.highBET.log %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering3.visuhigh log, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#BET
+ggplot(data=df.highBET.log, aes(group = nbclust.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET.log, aes(group = nbclust.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET.log, aes(group = nbclust.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET.log %>% group_by(nbclust.Ward) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(nbclust.Ward, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET.log, aes(x = xLon, y = yLat, color = as.factor(nbclust.Ward), pch = as.factor(nbclust.Ward))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (log)", subtitle = "clustering: nbclust, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### UPGMA
+```{r clustering4 log, echo=TRUE}
+#method = average UPGMA
+nbclust.UPGMA <- NbClust(data = codebook, distance = "euclidean", method = "average", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.UPGMA$Best.partition])
+add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.UPGMA$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.highBET.log <- df.highBET.log %>% inner_join(clusters, by = "obsID")
+```
+
+```{r clustering4.visu log, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#BET
+ggplot(data=df.highBET.log, aes(group = nbclust.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.highBET.log, aes(group = nbclust.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.highBET.log, aes(group = nbclust.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.highBET.log %>% group_by(nbclust.UPGMA.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ)) %>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(nbclust.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.highBET)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.highBET, aes(x= "", y=summary.highBET[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.highBET.log, aes(x = xLon, y = yLat, color = as.factor(nbclust.UPGMA.high), pch = as.factor(nbclust.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET abundance hotspot (log)", subtitle = "clustering: nbclust, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+# Simulated dataset with high abundance cluster of YFT + BET
+## create dataset
+```{r}
+set.seed(1000)
+df.high2 <- df.random %>% 
+  mutate(ab.BET = case_when(cellID %in% (400:700) & cellID.hor %in% (400:700) ~ "high", cellID < 400 & cellID.hor < 400 ~ "low", cellID < 400 & cellID.hor > 700 ~ "low", cellID > 700 & cellID.hor < 400 ~ "low", cellID > 700 & cellID.hor > 700 ~ "low", cellID < 400 ~ "low", cellID > 700 ~"low", cellID.hor < 400 ~ "low", cellID.hor > 700 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.BET == "high" ~ rBET + 15000, 
+                          ab.BET == "low" ~ rBET)) %>%
+  mutate(rYFT = case_when(ab.BET == "high" ~ rYFT + 25000, 
+                          ab.BET == "low" ~ rYFT)) %>%
+  select(-node.x, -cluster.Ward, -node.y, -cluster.UPGMA)
+
+#show statistics
+summary.high2 <- skim(df.high2[,5:7]) %>% select(-skim_type,-numeric.hist,-n_missing, -complete_rate)
+knitr::kable(summary.high2)
+```
+
+## SOM analysis
+### SOM parameters
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.high2[,5:7]
+data <- data.matrix(data)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 20000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 20'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+#### Using Ward's criterion
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#also view heat maps
+for(j in 1:ncol(data)){{plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+
+#Boxplots
+##BET
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(cluster.Ward.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ))%>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(cluster.Ward.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(cluster.Ward.high), pch = as.factor(cluster.Ward.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot", subtitle = "clustering: hclust + cuTreeHybrid, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### Using UPGMA
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="average")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+#BET
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(cluster.UPGMA.high) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(cluster.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(cluster.UPGMA.high), pch = as.factor(cluster.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot", subtitle = "clustering: hclust + cuTreeHybrid, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+##  Clustering using nbClust and descriptive statistics
+### Ward
+```{r, echo=TRUE}
+#method = average UPGMA
+codebook <- getCodes(som)
+nbclust.Ward <- NbClust(data = codebook, distance = "euclidean", method = "ward.D2", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.Ward$Best.partition])
+add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.Ward$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#BET
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(nbclust.Ward) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(nbclust.Ward, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(nbclust.Ward), pch = as.factor(nbclust.Ward))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot", subtitle = "clustering:nbclst, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### UPGMA
+```{r, echo=TRUE}
+#method = average UPGMA
+nbclust.UPGMA <- NbClust(data = codebook, distance = "euclidean", method = "average", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.UPGMA$Best.partition])
+add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.UPGMA$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#BET
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(nbclust.UPGMA.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ)) %>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(nbclust.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(nbclust.UPGMA.high), pch = as.factor(nbclust.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot", subtitle = "clustering:nbclst, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+# Simulated dataset with high abundance cluster of YFT + BET, centered and scaled
+## create dataset
+```{r}
+set.seed(1000)
+df.high2 <- df.high2[, 1:9]
+```
+
+## SOM analysis
+### SOM parameters
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.high2[,5:7]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 20000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 20'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+#### Using Ward's criterion
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#also view heat maps
+for(j in 1:ncol(data)){{plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+
+#Boxplots
+##BET
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(cluster.Ward.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ))%>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(cluster.Ward.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(cluster.Ward.high), pch = as.factor(cluster.Ward.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, CS", subtitle = "clustering: hclust + cuTreeHybrid, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### Using UPGMA
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="average")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+#BET
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.high2 %>% group_by(cluster.UPGMA.high) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(cluster.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(cluster.UPGMA.high), pch = as.factor(cluster.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, CS", subtitle = "clustering: hclust + cuTreeHybrid, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+##  Clustering using nbClust and descriptive statistics
+### Ward
+```{r, echo=TRUE}
+#method = average UPGMA
+codebook <- getCodes(som)
+nbclust.Ward <- NbClust(data = codebook, distance = "euclidean", method = "ward.D2", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.Ward$Best.partition])
+add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.Ward$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#BET
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(nbclust.Ward) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(nbclust.Ward, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(nbclust.Ward), pch = as.factor(nbclust.Ward))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, CS", subtitle = "clustering:nbclst, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### UPGMA
+```{r, echo=TRUE}
+#method = average UPGMA
+nbclust.UPGMA <- NbClust(data = codebook, distance = "euclidean", method = "average", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.UPGMA$Best.partition])
+add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.UPGMA$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#BET
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(nbclust.UPGMA.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ)) %>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(nbclust.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(nbclust.UPGMA.high), pch = as.factor(nbclust.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, CS", subtitle = "clustering: nbclust, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+# Simulated dataset with high abundance cluster of YFT + BET, log-transformed, centered and scaled
+## create dataset
+```{r}
+set.seed(1000)
+df.high2 <- df.high2[, 1:9] %>% mutate(rBET = log1p(rBET), rYFT = log1p(rYFT), rSKJ = log1p(rSKJ))
+```
+
+## SOM analysis
+### SOM parameters
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.high2[,5:7]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 20000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 20'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+#### Using Ward's criterion
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+
+#Boxplots
+##BET
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(cluster.Ward.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ))%>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(cluster.Ward.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(cluster.Ward.high), pch = as.factor(cluster.Ward.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, log CS", subtitle = "clustering: hclust + cuTreeHybrid, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### Using UPGMA
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="average")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+#BET
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.high2 %>% group_by(cluster.UPGMA.high) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(cluster.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(cluster.UPGMA.high), pch = as.factor(cluster.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, log CS", subtitle = "clustering: hclust + cuTreeHybrid, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+##  Clustering using nbClust and descriptive statistics
+### Ward
+```{r, echo=TRUE}
+#method = average UPGMA
+codebook <- getCodes(som)
+nbclust.Ward <- NbClust(data = codebook, distance = "euclidean", method = "ward.D2", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.Ward$Best.partition])
+add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.Ward$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#BET
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(nbclust.Ward) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(nbclust.Ward, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(nbclust.Ward), pch = as.factor(nbclust.Ward))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, log CS", subtitle = "clustering:nbclst, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### UPGMA
+```{r, echo=TRUE}
+#method = average UPGMA
+nbclust.UPGMA <- NbClust(data = codebook, distance = "euclidean", method = "average", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.UPGMA$Best.partition])
+add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.UPGMA$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#BET
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(nbclust.UPGMA.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ)) %>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(nbclust.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(nbclust.UPGMA.high), pch = as.factor(nbclust.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, log CS", subtitle = "clustering: nbclust, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+# Simulated dataset with high abundance cluster of YFT + BET, log-transformed (not CS)
+## create dataset
+```{r}
+set.seed(1000)
+df.high2 <- df.high2[, 1:9]
+```
+
+## SOM analysis
+### SOM parameters
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.high2[,5:7]
+data <- data.matrix(data)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 20000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 20'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+#### Using Ward's criterion
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+
+#Boxplots
+##BET
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.high2, aes(group = cluster.Ward.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward.high))) + scale_fill_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(cluster.Ward.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ))%>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(cluster.Ward.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(cluster.Ward.high), pch = as.factor(cluster.Ward.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, log", subtitle = "clustering: hclust + cuTreeHybrid, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### Using UPGMA
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="average")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}
+#BET
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = cluster.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster", subtitle = "UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.highBET <- df.high2 %>% group_by(cluster.UPGMA.high) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(cluster.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-2)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(cluster.UPGMA.high), pch = as.factor(cluster.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, log", subtitle = "clustering: hclust + cuTreeHybrid, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+##  Clustering using nbClust and descriptive statistics
+### Ward
+```{r, echo=TRUE}
+#method = average UPGMA
+codebook <- getCodes(som)
+nbclust.Ward <- NbClust(data = codebook, distance = "euclidean", method = "ward.D2", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.Ward$Best.partition])
+add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.Ward$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.Ward$Best.partition)}
+
+#BET
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = nbclust.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.Ward))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(nbclust.Ward) %>% summarise(rBET = sum(rBET), rYFT = sum(rYFT), rSKJ = sum(rSKJ)) %>% mutate(Total = rBET + rYFT + rSKJ) %>% mutate(propBET = rBET/Total, propYFT = rYFT/Total, propSKJ = rSKJ/Total) %>% select(nbclust.Ward, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(nbclust.Ward), pch = as.factor(nbclust.Ward))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, log", subtitle = "clustering:nbclst, Ward") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```
+
+### UPGMA
+```{r, echo=TRUE}
+#method = average UPGMA
+nbclust.UPGMA <- NbClust(data = codebook, distance = "euclidean", method = "average", min.nc = 2, max.nc = 15, index = "all", alphaBeale = 0.1)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[nbclust.UPGMA$Best.partition])
+add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#incorporate cluster assignation to iris dataset
+clusters <- as_tibble(nbclust.UPGMA$Best.partition) %>% rowid_to_column(var = "node") %>% mutate(nbclust.UPGMA.high = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.high2 <- df.high2 %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#also view heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, nbclust.UPGMA$Best.partition)}
+
+#BET
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rBET)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "BET by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#YFT
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rYFT)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "YFT by cluster", subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#SKJ
+ggplot(data=df.high2, aes(group = nbclust.UPGMA.high, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(nbclust.UPGMA.high))) + scale_fill_manual(breaks = c(0:10), values = Clusters.col, labels = c(0:10)) + labs(title = "SKJ by cluster",  subtitle = "nbclust UPGMA") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#Pie charts
+#first create summary
+summary.high2 <- df.high2 %>% group_by(nbclust.UPGMA.high) %>% summarise(BET = sum(rBET), YFT = sum(rYFT), SKJ = sum(rSKJ)) %>% mutate(Total = BET + YFT + SKJ) %>% mutate(propBET = BET/Total, propYFT = YFT/Total, propSKJ = SKJ/Total) %>% select(nbclust.UPGMA.high, propBET, propYFT, propSKJ) %>% t() %>% as.data.frame() %>% slice(-1) %>% rownames_to_column() %>% rename(Species= rowname)
+
+#create loop
+nb <- ncol(summary.high2)-1
+for(j in 2:(nb+1)){
+  print(ggplot(data = summary.high2, aes(x= "", y=summary.high2[,j], fill = as.factor(Species))) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0) + labs(title = paste("Species' proportions in cluster", j-1)))
+}
+
+#geographic map
+ggplot() + geom_sf(data = world) + geom_point(data = df.high2, aes(x = xLon, y = yLat, color = as.factor(nbclust.UPGMA.high), pch = as.factor(nbclust.UPGMA.high))) + scale_colour_manual(breaks = c(0:8), values = Clusters.col, labels = c(0:8)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot, log", subtitle = "clustering: nbclust, UPGMA") + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)
+```

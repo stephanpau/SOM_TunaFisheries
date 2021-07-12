@@ -1,0 +1,2346 @@
+---
+title: "DataSimulation_Over12Months"
+author: "Pauline"
+date: "08 6 2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+---
+# Description
+The aim of these simulations is to increase complexity of the dataset step by step by adding hotspots in order to test the limits of the method.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, results='markup', fig.show="hold", out.width="50%")
+library(tidyverse)
+library(openxlsx)
+#plottinggit oull
+library(ggplot2)
+library(sf)
+library(spData)
+library(scatterpie)
+library(sp)
+#SOM and clustering
+library(kohonen)
+library(vegan)
+library(dynamicTreeCut)
+library(NbClust)
+library(skimr)
+#random number generation
+library(truncnorm)
+#colours
+library(RColorBrewer)
+Clusters.col <- c(brewer.pal(name="Dark2", n = 8), brewer.pal(name="Paired", n = 8))
+Vulnerability.col <- c(brewer.pal(name = "RdYlBu", n = 11))
+#define palette for plotting
+coolBlueHotRed <- function(n, alpha = 1){rainbow(n, end=4/6, alpha=alpha)[n:1]}
+```
+
+# Check out statisitics of ICCAT's task 2 to have an idea of range etc.
+```{r}
+#load iccat dataset and get statistical info
+df <- read.xlsx("~/ETHZ/Master/Masterarbeit/TunaSOM.2/Data/t2ce_ETRO-PS1991-19_bySchool.xlsx", startRow = 7) %>% filter(FishMode == "FAD")
+
+df.summary <- df %>% 
+  group_by(YearC, TimePeriodID, xLon, yLat) %>% #group them to have total of catches per spatio-temporal cell since this is what we will simulate in the data (and not several lines per cell due to flag data)
+  summarise(BET = sum(BET), YFT = sum(YFT), SKJ = sum(SKJ), Eff2 = sum(Eff2)) %>% 
+  select(xLon, yLat, YearC, TimePeriodID, BET, YFT, SKJ, Eff2)
+
+ICCATsummary <- skim(df.summary[,5:7]) %>% select(-skim_type, -numeric.hist, -complete_rate)
+knitr::kable(ICCATsummary)
+```
+
+# Random dataframe based on ICCAT's statistics (mean and standard deviation)
+## Create empty dataframe with one row for each geographic cell and create columns of random catches
+```{r}
+#extract only cells
+df.cells <- df %>% mutate(cellID = group_indices(., xLon, yLat), cellID.hor = group_indices(., yLat, xLon)) %>% select(cellID, xLon, yLat, TimePeriodID, cellID.hor) %>% unique()
+
+#try out generating complete random numbers with same statistics as species
+#use truncnorm function to generate only positive numbers (set a=0, lower bound)
+set.seed(10000)
+df.random <- df.cells %>% mutate(
+  rBET = rtruncnorm(a = 0, n = nrow(df.cells), mean = ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"], sd = ICCATsummary$numeric.sd[ICCATsummary$skim_variable=="BET"]), 
+  rYFT = rtruncnorm(a = 0, n = nrow(df.cells), mean = ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="YFT"], sd = ICCATsummary$numeric.sd[ICCATsummary$skim_variable=="YFT"]), 
+  rSKJ = rtruncnorm(a = 0, n = nrow(df.cells), mean = ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="SKJ"], sd = ICCATsummary$numeric.sd[ICCATsummary$skim_variable=="SKJ"])) %>% rowid_to_column(var = "obsID")
+
+#show statistics
+summary.random <- skim(df.random[,7:9]) %>% select(-skim_type,-numeric.hist,-n_missing, -complete_rate)
+knitr::kable(summary.random)
+```
+
+## Plot random catches in space and time
+```{r, echo =FALSE}
+#plot abundace of each species to see
+#BET
+for(j in 1:2){
+  print(ggplot() + geom_point(data = df.random[df.random$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rBET/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="BET Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "Random BET catches", subtitle = paste("Month", j)))}
+
+#YFT
+for(j in 1:2){
+  print(ggplot() + geom_point(data = df.random[df.random$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rYFT/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="YFT Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "Random YFT catches", subtitle = paste("Month", j)))}
+
+#SKJ
+for(j in 1:2){
+  print(ggplot() + geom_point(data = df.random[df.random$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rSKJ/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="SKJ Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "Random SKJ catches", subtitle = paste("Month", j)))}
+```
+
+# High abundance clusters BET/YFT months 1-3
+## Create dataset
+```{r}
+set.seed(1000)
+df.mixed <- df.random %>% 
+  mutate(ab.BET = case_when(
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (1:3) ~ "high",
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (4:12) ~ "low",
+    cellID < 400 & cellID.hor < 400 ~ "low", 
+    cellID < 400 & cellID.hor > 700 ~ "low", 
+    cellID > 700 & cellID.hor < 400 ~ "low", 
+    cellID > 700 & cellID.hor > 700 ~ "low", 
+    cellID < 400 ~ "low", cellID > 700 ~"low", 
+    cellID.hor < 400 ~ "low", cellID.hor > 700 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.BET == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, 
+                          ab.BET == "low" ~ rBET),
+         rYFT = case_when(ab.BET == "high" ~ rYFT + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="YFT"]*2, 
+                          ab.BET == "low" ~ rYFT))
+```
+
+## plot high abundance clusters
+```{r}
+#BET
+for(j in 1:3){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rBET/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="BET Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "Random BET catches", subtitle = paste("Month", j)))}
+
+#YFT
+for(j in 1:3){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rYFT/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="YFT Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "Random YFT catches", subtitle = paste("Month", j)))}
+```
+
+## Put in matrix shape, center and scale data
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.mixed[,7:9]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+## SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 10000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 10'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = as.factor(treecut$labels))
+add.cluster.boundaries(som, treecut$labels)}
+
+#also view heat maps
+for(j in 1:ncol(data)){{plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.mixed <- df.mixed %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#Boxplots
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#geographic map
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + theme_bw() + labs(title = "Simulated dataset with high BET + YFT abundance hotspot", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE))}
+```
+
+### Extract clusters of interest using distances between clusters' medians
+```{r}
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ))
+
+#For vulnerable tuna species: BET and YFT
+##for each species, sort by median and select clusters above highest distance
+###BET
+BET.medians <- df.medians %>% select(cluster.Ward, rBET) %>% 
+  arrange(desc(rBET)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rBET, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- BET.medians[BET.medians$distance == max(BET.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+BET.medians <- BET.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###YFT
+YFT.medians <- df.medians %>% select(cluster.Ward, rYFT) %>% 
+  arrange(desc(rYFT)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rYFT, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- YFT.medians[YFT.medians$distance == max(YFT.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+YFT.medians <- YFT.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##only BET and YFT for first 3 months
+##bind two vectors 
+BET.YFT.medians <- rbind(BET.medians, YFT.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% BET.YFT.medians)
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High YFT and BET abundance clusters", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+### Create a vulnerability index by cluster 
+```{r}
+library(scales)
+###set weight factors for each species, as Kobe plot
+fac.BET <- 4
+fac.YFT <- 3
+fac.SKJ <- 1
+
+#take again this df.median
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.tuna = round((fac.BET*rBET + fac.YFT*rYFT + fac.SKJ *rSKJ)/((fac.BET+fac.YFT+fac.SKJ)*1000))) %>%
+  mutate(vulnerability.tuna = round(rescale(vulnerability.tuna, c(1,10)))) %>% #rescale to have values between 1 and 10
+  arrange(desc(vulnerability.tuna)) %>%#arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.tuna) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#replot boxplots with vulnerability colors
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.tuna)), pch = 15) + scale_colour_manual(values = rev(Vulnerability.col[1:10]), breaks = c(1:10), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of tuna species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability", subtitle = "Tuna species")))}
+```
+
+# High abundance cluster of BET/YFT + high ab of BET month 11
+## Create dataset
+```{r}
+set.seed(1000)
+df.mixed <- df.random %>% 
+  #high abundance cluster BET + YFT, months 1-3
+  mutate(ab.both = case_when(
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (1:3) ~ "high",
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (4:12) ~ "low",
+    cellID < 400 & cellID.hor < 400 ~ "low", 
+    cellID < 400 & cellID.hor > 700 ~ "low", 
+    cellID > 700 & cellID.hor < 400 ~ "low", 
+    cellID > 700 & cellID.hor > 700 ~ "low", 
+    cellID < 400 ~ "low", cellID > 700 ~"low", 
+    cellID.hor < 400 ~ "low", cellID.hor > 700 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.both == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, 
+                          ab.both == "low" ~ rBET),
+         rYFT = case_when(ab.both == "high" ~ rYFT + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="YFT"]*2, 
+                          ab.both == "low" ~ rYFT)) %>%
+  
+  #high abundance BET month 11
+  mutate(ab.BET = case_when(
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (11) ~ "high",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (1:10) ~ "low",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (12) ~ "low",
+    cellID < 100 & cellID.hor < 100 ~ "low", 
+    cellID < 100 & cellID.hor > 500 ~ "low", 
+    cellID > 500 & cellID.hor < 100 ~ "low", 
+    cellID > 500 & cellID.hor > 500 ~ "low", 
+    cellID < 100 ~ "low", cellID > 500 ~"low", 
+    cellID.hor < 100 ~ "low", cellID.hor > 500 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.BET == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, 
+                          ab.BET == "low" ~ rBET))
+```
+
+## plot hotspots
+```{r}
+#BET
+for(j in c(1,2,3,11)){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rBET/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rBET Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rBET catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 and 11 high abundance"))}
+
+#YFT
+for(j in 1:3){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rYFT/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rYFT Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rYFT catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 high abundance"))}
+
+#SKJ
+for(j in 3:4){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rSKJ/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rSKJ Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rSKJ catches", subtitle = paste("Month", j), caption = "Months of interest: 3-4 low abundance"))}
+```
+
+## SOM analysis
+### SOM parameters
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.mixed[,7:9]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 10000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 10'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+## Clustering using hclust + dynamicTreeCut and descriptive statistics
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[treecut$labels])
+add.cluster.boundaries(som, treecut$labels)}
+
+#also view heat maps
+for(j in 1:ncol(data)){{plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.mixed <- df.mixed %>% inner_join(clusters, by = "obsID")
+```
+
+### All boxplots and clusters in geographic space
+```{r, echo=FALSE}
+#Boxplots
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#geographic map
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + theme_bw() + labs(title = "Simulated dataset with three different spots (high BET/YFT, high BET, low SKJ)", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE))}
+```
+
+### Extract clusters of interest using distances between clusters' medians
+```{r}
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ))
+
+#For vulnerable tuna species: BET and YFT
+##for each species, sort by median and select clusters above highest distance
+###BET
+BET.medians <- df.medians %>% select(cluster.Ward, rBET) %>% 
+  arrange(desc(rBET)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rBET, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- BET.medians[BET.medians$distance == max(BET.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+BET.medians <- BET.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###YFT
+YFT.medians <- df.medians %>% select(cluster.Ward, rYFT) %>% 
+  arrange(desc(rYFT)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rYFT, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- YFT.medians[YFT.medians$distance == max(YFT.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+YFT.medians <- YFT.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##only BET and YFT for first 3 months
+##bind two vectors 
+BET.YFT.medians <- rbind(BET.medians, YFT.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% BET.YFT.medians)
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High YFT and BET abundance clusters", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+### Create a vulnerability index by cluster 
+```{r}
+library(scales)
+###set weight factors for each species, based on Kobe plot
+fac.BET <- 4
+fac.YFT <- 3
+fac.SKJ <- 1
+
+#take again this df.median
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.tuna = round((fac.BET*rBET + fac.YFT*rYFT + fac.SKJ *rSKJ)/((fac.BET+fac.YFT+fac.SKJ)*1000))) %>%
+  mutate(vulnerability.tuna = round(rescale(vulnerability.tuna, c(1,10)))) %>% #rescale to have values between 1 and 10
+  arrange(desc(vulnerability.tuna)) %>%#arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.tuna) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#replot boxplots with vulnerability colors
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.tuna)), pch = 15) + scale_colour_manual(values = rev(Vulnerability.col[1:10]), breaks = c(1:10), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of tuna species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability", subtitle = "Tuna species")))}
+```
+
+# Dataset with tuna hotspots + shark abundance index and shark hotspot over four months along the coast
+## create dataset
+```{r}
+#extract only cells
+df.cells <- df %>% mutate(cellID = group_indices(., xLon, yLat), cellID.hor = group_indices(., yLat, xLon)) %>% select(cellID, xLon, yLat, TimePeriodID, cellID.hor) %>% unique()
+
+#try out generating complete random numbers with same statistics as species
+#use truncnorm function to generate only positive numbers (set a=0, lower bound)
+set.seed(10000)
+df.random <- df.cells %>% mutate(
+  rBET = rtruncnorm(a = 0, n = nrow(df.cells), mean = ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"], sd = ICCATsummary$numeric.sd[ICCATsummary$skim_variable=="BET"]), 
+  rYFT = rtruncnorm(a = 0, n = nrow(df.cells), mean = ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="YFT"], sd = ICCATsummary$numeric.sd[ICCATsummary$skim_variable=="YFT"]), 
+  rSKJ = rtruncnorm(a = 0, n = nrow(df.cells), mean = ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="SKJ"], sd = ICCATsummary$numeric.sd[ICCATsummary$skim_variable=="SKJ"]),
+  #use this function for skewed normal distribution
+  rFAL = round(rtruncnorm(n = nrow(df.cells), a = 0, b = 6, mean = 1.5, sd = 1), 0)) %>%
+  rowid_to_column(var = "obsID")
+
+#show statistics
+summary.random <- skim(df.random[,7:10]) %>% select(-skim_type,-numeric.hist,-n_missing, -complete_rate)
+knitr::kable(summary.random)
+```
+
+## Plot FAL random abundances (two  months as illustration)
+```{r, echo =FALSE}
+for(j in 1:2){
+  print(ggplot() + geom_point(data = df.random[df.random$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rFAL)), alpha = 0.5, col = "forestgreen")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="BET Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "Random FAL abundance indice", subtitle = paste("Month", j)))}
+```
+
+## create hotspots
+```{r}
+df.mixed <- df.random %>% 
+  #high abundance cluster BET + YFT, months 1-3
+  mutate(ab.both = case_when(
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (1:3) ~ "high",
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (4:12) ~ "low",
+    cellID < 400 & cellID.hor < 400 ~ "low", 
+    cellID < 400 & cellID.hor > 700 ~ "low", 
+    cellID > 700 & cellID.hor < 400 ~ "low", 
+    cellID > 700 & cellID.hor > 700 ~ "low", 
+    cellID < 400 ~ "low", cellID > 700 ~"low", 
+    cellID.hor < 400 ~ "low", cellID.hor > 700 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.both == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, 
+                          ab.both == "low" ~ rBET),
+         rYFT = case_when(ab.both == "high" ~ rYFT + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="YFT"]*2, 
+                          ab.both == "low" ~ rYFT)) %>%
+  
+  #high FAL abundance along the coast
+  mutate(ab.FAL = case_when(
+    cellID %in% (700:1200) & cellID.hor %in% (700:1200) & TimePeriodID %in% (9:12) ~ "high",
+    cellID %in% (700:1200) & cellID.hor %in% (700:1200) & TimePeriodID %in% (1:8) ~ "normal",
+    cellID < 700 & cellID.hor < 700 ~ "normal", 
+    cellID < 700 & cellID.hor > 1200 ~ "normal", 
+    cellID > 1200 & cellID.hor < 700 ~ "normal", 
+    cellID > 1200 & cellID.hor > 1200 ~ "normal", 
+    cellID < 700 ~ "normal", cellID > 1200 ~"normal", 
+    cellID.hor < 700 ~ "normal", cellID.hor > 1200 ~ "normal")) %>% 
+  mutate(rFAL = case_when(ab.FAL == "normal" ~ rFAL, 
+                          ab.FAL == "high" ~ rFAL + 3)) %>%
+  
+  #high abundance BET month 11
+  mutate(ab.BET = case_when(
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (11) ~ "high",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (1:10) ~ "low",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (12) ~ "low",
+    cellID < 100 & cellID.hor < 100 ~ "low", 
+    cellID < 100 & cellID.hor > 500 ~ "low", 
+    cellID > 500 & cellID.hor < 100 ~ "low", 
+    cellID > 500 & cellID.hor > 500 ~ "low", 
+    cellID < 100 ~ "low", cellID > 500 ~"low", 
+    cellID.hor < 100 ~ "low", cellID.hor > 500 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.BET == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, 
+                          ab.BET == "low" ~ rBET))
+```
+
+```{r}
+#BET
+for(j in c(1,2,3,11)){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rBET/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rBET Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rBET catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 and 11 high abundance"))}
+
+#YFT
+for(j in 1:3){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rYFT/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rYFT Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rYFT catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 high abundance"))}
+
+#FAL
+for(j in 9:12){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rFAL)), alpha = 0.5, col = "forestgreen")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rFAL abundance indice"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rFAL abundance", subtitle = paste("Month", j), caption = "Months of interest: 9-12 high abundance"))}
+```
+
+## SOM analysis
+### SOM parameters
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.mixed[,7:10]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 10000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 10'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+## Clustering using hclust + dynamicTreeCut and descriptive statistics
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[treecut$labels])
+add.cluster.boundaries(som, treecut$labels)}
+
+#also view heat maps
+for(j in 1:ncol(data)){{plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.mixed <- df.mixed %>% inner_join(clusters, by = "obsID")
+```
+
+### All boxplots and clusters in geographic space
+```{r, echo=FALSE}
+#Boxplots
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#FAL
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rFAL)) + geom_histogram() + geom_histogram(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16))+ labs(title = "rFAL abundance index by cluster", caption = "Simulated dataset") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#geographic map
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "Simulated dataset with 8 hotspots", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE))}
+```
+
+### Extract clusters of interest using distances between clusters' medians
+#### For tunas
+```{r}
+#For TUNAS
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL))
+
+#For vulnerable tuna species: BET and YFT
+##for each species, sort by median and select clusters above highest distance
+###BET
+BET.medians <- df.medians %>% select(cluster.Ward, rBET) %>% 
+  arrange(desc(rBET)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rBET, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- BET.medians[BET.medians$distance == max(BET.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+BET.medians <- BET.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###YFT
+YFT.medians <- df.medians %>% select(cluster.Ward, rYFT) %>% 
+  arrange(desc(rYFT)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rYFT, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- YFT.medians[YFT.medians$distance == max(YFT.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+YFT.medians <- YFT.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##only BET and YFT for first 3 months
+##bind two vectors 
+BET.YFT.medians <- rbind(BET.medians, YFT.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% BET.YFT.medians)
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High YFT and BET abundance clusters", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+#### For associated species
+```{r}
+##for each species, sort by median and select clusters above highest distance
+FAL.medians <- df.medians %>% select(cluster.Ward, rFAL) %>%
+  arrange(desc(rFAL)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rFAL, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- FAL.medians[FAL.medians$distance == max(FAL.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+FAL.medians <- FAL.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+## visualise in geographic space
+df.visual <- df.mixed %>% filter(cluster.Ward %in% FAL.medians)
+for(j in 9:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High FAL and RAY abundance clusters", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+### Create a vulnerability index by cluster 
+#### For tunas
+```{r}
+library(scales)
+###set weight factors for each species, based on Kobe plot
+fac.BET <- 4
+fac.YFT <- 3
+fac.SKJ <- 1
+
+#take again this df.median
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.tuna = round((fac.BET*rBET + fac.YFT*rYFT + fac.SKJ *rSKJ)/((fac.BET+fac.YFT+fac.SKJ)*1000))) %>%
+  mutate(vulnerability.tuna = round(rescale(vulnerability.tuna, c(1,10)))) %>% #rescale to have values between 1 and 10
+  arrange(desc(vulnerability.tuna)) %>%#arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.tuna) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#replot boxplots with vulnerability colors
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.tuna)), pch = 15) + scale_colour_manual(values = rev(Vulnerability.col[1:10]), breaks = c(1:10), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of tuna species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability", subtitle = "Tuna species")))}
+```
+
+#### For associated species
+```{r}
+##For accessory species
+#set weight factors for each species
+fac.FAL <- 3
+
+##create column
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.accessory = (fac.FAL*rFAL)) %>% #rFal a little more since more often bycaught
+  mutate(vulnerability.accessory = round(rescale(vulnerability.accessory, c(1,10)))) %>% #rescale to have values between 0 and 10
+  arrange(desc(vulnerability.accessory)) %>% #arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.accessory) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#plot maps with color based on vulnerability in r
+for(j in 9:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.accessory)), pch = 15) + scale_colour_manual(breaks = c(1:10),values = rev(Vulnerability.col[1:10]), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of accessory species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability")))}
+```
+
+# Same hotspots as above but add one more accessory species with its own hotspots (ray, as Lezama-Ochoa 2020)
+## visualise position and create dataset
+```{r}
+#visualise hotspot
+#visual cellID repartition in space
+ggplot() + geom_point(data = df.random, aes(x = xLon, y=yLat), alpha = 0.5, col = "red")+
+  geom_point(data = df.random[df.random$cellID<300,], aes(x = xLon, y=yLat), alpha = 0.5, col = "midnightblue") +
+  geom_point(data = df.random[df.random$cellID>800,], aes(x = xLon, y=yLat), alpha = 0.5, col = "midnightblue") +
+  geom_point(data = df.random[df.random$cellID.hor<1000,], aes(x = xLon, y=yLat), alpha = 0.5, col = "midnightblue") +
+  geom_point(data = df.random[df.random$cellID.hor>1226,], aes(x = xLon, y=yLat), alpha = 0.5, col = "midnightblue") +
+    geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+    coord_sf(xlim= c(-35,15), ylim = c(-25,25))+ theme_minimal()+
+    theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14)) +
+  labs(title = "Sampling cells", subtitle = "High ray abundance cluster in red")
+
+#create datasete
+df.mixed <- df.random %>% 
+  #create rRay column first
+  mutate(rRAY = round(rtruncnorm(n = nrow(df.cells), a = 0, b = 6, mean = 1.5, sd = 1), 0)) %>%
+  #high abundance cluster BET + YFT, months 1-3
+  mutate(ab.both = case_when(
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (1:3) ~ "high",
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (4:12) ~ "low",
+    cellID < 400 & cellID.hor < 400 ~ "low", 
+    cellID < 400 & cellID.hor > 700 ~ "low", 
+    cellID > 700 & cellID.hor < 400 ~ "low", 
+    cellID > 700 & cellID.hor > 700 ~ "low", 
+    cellID < 400 ~ "low", cellID > 700 ~"low", 
+    cellID.hor < 400 ~ "low", cellID.hor > 700 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.both == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, 
+                          ab.both == "low" ~ rBET),
+         rYFT = case_when(ab.both == "high" ~ rYFT + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="YFT"]*2, 
+                          ab.both == "low" ~ rYFT)) %>%
+  
+  #high FAL abundance along the coast
+  mutate(ab.FAL = case_when(
+    cellID %in% (700:1200) & cellID.hor %in% (700:1200) & TimePeriodID %in% (9:12) ~ "high",
+    cellID %in% (700:1200) & cellID.hor %in% (700:1200) & TimePeriodID %in% (1:8) ~ "normal",
+    cellID < 700 & cellID.hor < 700 ~ "normal", 
+    cellID < 700 & cellID.hor > 1200 ~ "normal", 
+    cellID > 1200 & cellID.hor < 700 ~ "normal", 
+    cellID > 1200 & cellID.hor > 1200 ~ "normal", 
+    cellID < 700 ~ "normal", cellID > 1200 ~"normal", 
+    cellID.hor < 700 ~ "normal", cellID.hor > 1200 ~ "normal")) %>% 
+  mutate(rFAL = case_when(ab.FAL == "normal" ~ rFAL, 
+                          ab.FAL == "high" ~ rFAL + 3)) %>%
+  
+  #high abundance BET month 11
+  mutate(ab.BET = case_when(
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (11) ~ "high",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (1:10) ~ "low",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (12) ~ "low",
+    cellID < 100 & cellID.hor < 100 ~ "low", 
+    cellID < 100 & cellID.hor > 500 ~ "low", 
+    cellID > 500 & cellID.hor < 100 ~ "low", 
+    cellID > 500 & cellID.hor > 500 ~ "low", 
+    cellID < 100 ~ "low", cellID > 500 ~"low", 
+    cellID.hor < 100 ~ "low", cellID.hor > 500 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.BET == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, 
+                          ab.BET == "low" ~ rBET)) %>%
+  
+  #high ray abundance in north west, as mob. mobular Lezama-Ochoa 2020
+  mutate(ab.RAY = case_when(
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (3:6) ~ "high",
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (1:2) ~ "normal",
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (7:12) ~ "normal",
+    cellID < 300 & cellID.hor < 1000 ~ "normal", 
+    cellID < 300 & cellID.hor > 1226 ~ "normal", 
+    cellID > 800 & cellID.hor < 1000 ~ "normal", 
+    cellID > 800 & cellID.hor > 1226 ~ "normal", 
+    cellID < 300 ~ "normal", cellID > 800 ~"normal", 
+    cellID.hor < 1000 ~ "normal", cellID.hor > 1226 ~ "normal")) %>% 
+  mutate(rRAY = case_when(ab.RAY == "normal" ~ rRAY, 
+                          ab.RAY == "high" ~ rRAY + 3))
+```
+
+```{r}
+#BET
+for(j in c(1,2,3,11)){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rBET/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rBET Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rBET catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 and 11 high abundance"))}
+
+#YFT
+for(j in 1:3){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rYFT/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rYFT Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rYFT catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 high abundance"))}
+
+#FAL
+for(j in 9:12){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rFAL)), alpha = 0.5, col = "forestgreen")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rFAL abundance indice"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rFAL abundance", subtitle = paste("Month", j), caption = "Months of interest: 9-12 high abundance"))}
+
+#RAY
+for(j in 3:6){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rRAY)), alpha = 0.5, col = "darkmagenta")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rRAY abundance indice"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rRAY abundance", subtitle = paste("Month", j), caption = "Months of interest: 3-6 high abundance"))}
+```
+
+## SOM analysis
+### SOM parameters
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.mixed[,7:11]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 10000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 10'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+## Clustering using hclust + dynamicTreeCut and descriptive statistics
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[treecut$labels])
+add.cluster.boundaries(som, treecut$labels)}
+
+#also view heat maps
+for(j in 1:ncol(data)){{plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.mixed <- df.mixed %>% inner_join(clusters, by = "obsID")
+```
+
+### All boxplots and clusters in geographic space
+```{r, echo=FALSE}
+#Boxplots
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#FAL
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rFAL)) + geom_histogram() + geom_histogram(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16))+ labs(title = "rFAL abundance index by cluster", caption = "Simulated dataset") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#RAY
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rRAY)) + geom_histogram() + geom_histogram(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16))+ labs(title = "rRAY abundance index by cluster", caption = "Simulated dataset") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#geographic map
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "Simulated dataset with 8 hotspots", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE))}
+```
+
+### Extract clusters of interest
+#### For tuna species
+```{r}
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY))
+
+#For vulnerable tuna species: BET and YFT
+##for each species, sort by median and select clusters above highest distance
+###BET
+BET.medians <- df.medians %>% select(cluster.Ward, rBET) %>% 
+  arrange(desc(rBET)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rBET, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- BET.medians[BET.medians$distance == max(BET.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+BET.medians <- BET.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###YFT
+YFT.medians <- df.medians %>% select(cluster.Ward, rYFT) %>% 
+  arrange(desc(rYFT)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rYFT, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- YFT.medians[YFT.medians$distance == max(YFT.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+YFT.medians <- YFT.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##only BET and YFT for first 3 months
+##bind two vectors 
+BET.YFT.medians <- rbind(BET.medians, YFT.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% BET.YFT.medians)
+for(j in 1:3){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High YFT and BET abundance clusters", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+#### For accessory species
+```{r}
+#For vulnerable accessory species: FAL and RAY
+##for each species, sort by median and select clusters above highest distance
+###FAL
+FAL.medians <- df.medians %>% select(cluster.Ward, rFAL) %>%
+  arrange(desc(rFAL)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rFAL, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- FAL.medians[FAL.medians$distance == max(FAL.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+FAL.medians <- FAL.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###RAY
+RAY.medians <- df.medians %>% select(cluster.Ward, rRAY) %>%
+  arrange(desc(rRAY)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rRAY, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- RAY.medians[RAY.medians$distance == max(RAY.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+RAY.medians <- RAY.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##only BET and YFT for first 3 months
+##bind two vectors 
+FAL.RAY.medians <- rbind(FAL.medians, RAY.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% FAL.RAY.medians)
+for(j in 3:11){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High FAL and RAY abundance clusters", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+### Create a vulnerability index by cluster 
+#### For tuna species
+```{r}
+library(scales)
+## For tuna species only
+###set weight factors for each species
+fac.BET <- 4
+fac.YFT <- 3
+fac.SKJ <- 1
+
+#take again this df.median
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.tuna = round((fac.BET*rBET + fac.YFT*rYFT + rSKJ)/((fac.BET+fac.YFT+fac.SKJ)*1000))) %>%
+  mutate(vulnerability.tuna = round(rescale(vulnerability.tuna, c(1,10)))) %>% #rescale to have values between 1 and 10
+  arrange(desc(vulnerability.tuna)) %>%#arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.tuna) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#replot boxplots with vulnerability colors
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.tuna)), pch = 15) + scale_colour_manual(values = rev(Vulnerability.col[1:10]), breaks = c(1:10), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of tuna species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability", subtitle = "Tuna species")))}
+```
+
+#### For accessory species
+```{r}
+##For accessory species
+#set weight factors for each species
+fac.FAL <- 3
+fac.RAY <- 2
+
+##create column
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.accessory = (fac.FAL*rFAL+fac.RAY*rRAY)) %>% #rFal a little more since more often bycaught
+  mutate(vulnerability.accessory = round(rescale(vulnerability.accessory, c(1,10)))) %>% #rescale to have values between 0 and 10
+  arrange(desc(vulnerability.accessory)) %>% #arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.accessory) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.accessory)), pch = 15) + scale_colour_manual(breaks = c(1:10),values = rev(Vulnerability.col[1:10]), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of accessory species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability")))}
+```
+
+## Extract cells from the BET hotspot that hasn't been found
+````{r}
+BET.hotspot11 <- df.mixed[df.mixed$ab.BET=="high",]
+hist(BET.hotspot11$cluster.Ward) #mostly in one and seven
+summary(BET.hotspot11)
+
+##BET
+ggplot(data=BET.hotspot11, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "BET by cluster: hotspot 11", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+```
+
+# Exactly the same as above, only BET hotspot @month11 is now +mean x3 instead of +mean x2
+## visualise position and create dataset
+```{r}
+#create datasete
+df.mixed <- df.random %>% 
+  #create rRay column first
+  mutate(rRAY = round(rtruncnorm(n = nrow(df.cells), a = 0, b = 6, mean = 1.5, sd = 1), 0)) %>%
+  #high abundance cluster BET + YFT, months 1-3
+  mutate(ab.both = case_when(
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (1:3) ~ "high",
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (4:12) ~ "low",
+    cellID < 400 & cellID.hor < 400 ~ "low", 
+    cellID < 400 & cellID.hor > 700 ~ "low", 
+    cellID > 700 & cellID.hor < 400 ~ "low", 
+    cellID > 700 & cellID.hor > 700 ~ "low", 
+    cellID < 400 ~ "low", cellID > 700 ~"low", 
+    cellID.hor < 400 ~ "low", cellID.hor > 700 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.both == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, 
+                          ab.both == "low" ~ rBET),
+         rYFT = case_when(ab.both == "high" ~ rYFT + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="YFT"]*2, 
+                          ab.both == "low" ~ rYFT)) %>%
+  
+  #high FAL abundance along the coast
+  mutate(ab.FAL = case_when(
+    cellID %in% (700:1200) & cellID.hor %in% (700:1200) & TimePeriodID %in% (9:12) ~ "high",
+    cellID %in% (700:1200) & cellID.hor %in% (700:1200) & TimePeriodID %in% (1:8) ~ "normal",
+    cellID < 700 & cellID.hor < 700 ~ "normal", 
+    cellID < 700 & cellID.hor > 1200 ~ "normal", 
+    cellID > 1200 & cellID.hor < 700 ~ "normal", 
+    cellID > 1200 & cellID.hor > 1200 ~ "normal", 
+    cellID < 700 ~ "normal", cellID > 1200 ~"normal", 
+    cellID.hor < 700 ~ "normal", cellID.hor > 1200 ~ "normal")) %>% 
+  mutate(rFAL = case_when(ab.FAL == "normal" ~ rFAL, 
+                          ab.FAL == "high" ~ rFAL + 3)) %>%
+  
+  #high abundance BET month 11
+  mutate(ab.BET = case_when(
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (11) ~ "high",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (1:10) ~ "low",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (12) ~ "low",
+    cellID < 100 & cellID.hor < 100 ~ "low", 
+    cellID < 100 & cellID.hor > 500 ~ "low", 
+    cellID > 500 & cellID.hor < 100 ~ "low", 
+    cellID > 500 & cellID.hor > 500 ~ "low", 
+    cellID < 100 ~ "low", cellID > 500 ~"low", 
+    cellID.hor < 100 ~ "low", cellID.hor > 500 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.BET == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*3, #here is the change
+                          ab.BET == "low" ~ rBET)) %>%
+  
+  #high ray abundance in north west, as mob. mobular Lezama-Ochoa 2020
+  mutate(ab.RAY = case_when(
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (3:6) ~ "high",
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (1:2) ~ "normal",
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (7:12) ~ "normal",
+    cellID < 300 & cellID.hor < 1000 ~ "normal", 
+    cellID < 300 & cellID.hor > 1226 ~ "normal", 
+    cellID > 800 & cellID.hor < 1000 ~ "normal", 
+    cellID > 800 & cellID.hor > 1226 ~ "normal", 
+    cellID < 300 ~ "normal", cellID > 800 ~"normal", 
+    cellID.hor < 1000 ~ "normal", cellID.hor > 1226 ~ "normal")) %>% 
+  mutate(rRAY = case_when(ab.RAY == "normal" ~ rRAY, 
+                          ab.RAY == "high" ~ rRAY + 3))
+```
+
+```{r, echo=FALSE}
+#BET
+for(j in c(1,2,3,11)){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rBET/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rBET Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rBET catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 and 11 high abundance"))}
+
+#YFT
+for(j in 1:3){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rYFT/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rYFT Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rYFT catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 high abundance"))}
+
+#FAL
+for(j in 9:12){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rFAL)), alpha = 0.5, col = "forestgreen")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rFAL abundance indice"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rFAL abundance", subtitle = paste("Month", j), caption = "Months of interest: 9-12 high abundance"))}
+
+#RAY
+for(j in 3:6){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rRAY)), alpha = 0.5, col = "darkmagenta")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rRAY abundance indice"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rRAY abundance", subtitle = paste("Month", j), caption = "Months of interest: 3-6 high abundance"))}
+```
+
+## SOM analysis
+### SOM parameters
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.mixed[,7:11]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 10000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 10'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[treecut$labels])
+add.cluster.boundaries(som, treecut$labels)}
+
+#also view heat maps
+for(j in 1:ncol(data)){{plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.mixed <- df.mixed %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#Boxplots
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#FAL
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rFAL)) + geom_histogram() + geom_histogram(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16))+ labs(title = "rFAL abundance index by cluster", caption = "Simulated dataset") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#RAY
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rRAY)) + geom_histogram() + geom_histogram(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16))+ labs(title = "rRAY abundance index by cluster", caption = "Simulated dataset") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#geographic map
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "Simulated dataset with 8 hotspots", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE))}
+```
+
+### Extract clusters of interest
+#### For tuna species
+```{r}
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY))
+
+#For vulnerable tuna species: BET and YFT
+##for each species, sort by median and select clusters above highest distance
+###BET
+BET.medians <- df.medians %>% select(cluster.Ward, rBET) %>% 
+  arrange(desc(rBET)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rBET, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- BET.medians[BET.medians$distance == max(BET.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+BET.medians <- BET.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###YFT
+YFT.medians <- df.medians %>% select(cluster.Ward, rYFT) %>% 
+  arrange(desc(rYFT)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rYFT, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- YFT.medians[YFT.medians$distance == max(YFT.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+YFT.medians <- YFT.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##only BET and YFT for first 3 months
+##bind two vectors 
+BET.YFT.medians <- rbind(BET.medians, YFT.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% BET.YFT.medians)
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High YFT and BET abundance clusters", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+#### For accessory species
+```{r}
+#For vulnerable accessory species: FAL and RAY
+##for each species, sort by median and select clusters above highest distance
+###FAL
+FAL.medians <- df.medians %>% select(cluster.Ward, rFAL) %>%
+  arrange(desc(rFAL)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rFAL, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- FAL.medians[FAL.medians$distance == max(FAL.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+FAL.medians <- FAL.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###RAY
+RAY.medians <- df.medians %>% select(cluster.Ward, rRAY) %>%
+  arrange(desc(rRAY)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rRAY, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- RAY.medians[RAY.medians$distance == max(RAY.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+RAY.medians <- RAY.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##bind two vectors 
+FAL.RAY.medians <- rbind(FAL.medians, RAY.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% FAL.RAY.medians)
+for(j in 3:11){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High FAL and RAY abundance clusters", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+### Create a vulnerability index by cluster 
+#### For tuna species
+```{r}
+library(scales)
+## For tuna species only
+###set weight factors for each species
+fac.BET <- 4
+fac.YFT <- 3
+fac.SKJ <- 1
+
+#take again this df.median
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.tuna = round((fac.BET*rBET + fac.YFT*rYFT + rSKJ)/((fac.BET+fac.YFT+fac.SKJ)*1000))) %>%
+  mutate(vulnerability.tuna = round(rescale(vulnerability.tuna, c(1,10)))) %>% #rescale to have values between 1 and 10
+  arrange(desc(vulnerability.tuna)) %>%#arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.tuna) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#replot boxplots with vulnerability colors
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.tuna)), pch = 15) + scale_colour_manual(values = rev(Vulnerability.col[1:10]), breaks = c(1:10), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of tuna species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability", subtitle = "Tuna species")))}
+```
+
+#### For accessory species
+```{r}
+##For accessory species
+#set weight factors for each species
+fac.FAL <- 3
+fac.RAY <- 2
+
+##create column
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.accessory = (fac.FAL*rFAL+fac.RAY*rRAY)) %>% #rFal a little more since more often bycaught
+  mutate(vulnerability.accessory = round(rescale(vulnerability.accessory, c(1,10)))) %>% #rescale to have values between 0 and 10
+  arrange(desc(vulnerability.accessory)) %>% #arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.accessory) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.accessory)), pch = 15) + scale_colour_manual(breaks = c(1:10),values = rev(Vulnerability.col[1:10]), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of accessory species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability")))}
+```
+
+# Exactly the same as two above, only BET hotspot @month11 is now @month7 (+15000)
+## visualise position and create dataset
+```{r}
+#create datasete
+df.mixed <- df.random %>% 
+  #create rRay column first
+  mutate(rRAY = round(rtruncnorm(n = nrow(df.cells), a = 0, b = 6, mean = 1.5, sd = 1), 0)) %>%
+  #high abundance cluster BET + YFT, months 1-3
+  mutate(ab.both = case_when(
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (1:3) ~ "high",
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (4:12) ~ "low",
+    cellID < 400 & cellID.hor < 400 ~ "low", 
+    cellID < 400 & cellID.hor > 700 ~ "low", 
+    cellID > 700 & cellID.hor < 400 ~ "low", 
+    cellID > 700 & cellID.hor > 700 ~ "low", 
+    cellID < 400 ~ "low", cellID > 700 ~"low", 
+    cellID.hor < 400 ~ "low", cellID.hor > 700 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.both == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, 
+                          ab.both == "low" ~ rBET),
+         rYFT = case_when(ab.both == "high" ~ rYFT + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="YFT"]*2, 
+                          ab.both == "low" ~ rYFT)) %>%
+  
+  #high FAL abundance along the coast
+  mutate(ab.FAL = case_when(
+    cellID %in% (700:1200) & cellID.hor %in% (700:1200) & TimePeriodID %in% (9:12) ~ "high",
+    cellID %in% (700:1200) & cellID.hor %in% (700:1200) & TimePeriodID %in% (1:8) ~ "normal",
+    cellID < 700 & cellID.hor < 700 ~ "normal", 
+    cellID < 700 & cellID.hor > 1200 ~ "normal", 
+    cellID > 1200 & cellID.hor < 700 ~ "normal", 
+    cellID > 1200 & cellID.hor > 1200 ~ "normal", 
+    cellID < 700 ~ "normal", cellID > 1200 ~"normal", 
+    cellID.hor < 700 ~ "normal", cellID.hor > 1200 ~ "normal")) %>% 
+  mutate(rFAL = case_when(ab.FAL == "normal" ~ rFAL, 
+                          ab.FAL == "high" ~ rFAL + 3)) %>%
+  
+  #high abundance BET month 11
+  mutate(ab.BET = case_when(
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (7) ~ "high",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (1:6) ~ "low",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (8:12) ~ "low",
+    cellID < 100 & cellID.hor < 100 ~ "low", 
+    cellID < 100 & cellID.hor > 500 ~ "low", 
+    cellID > 500 & cellID.hor < 100 ~ "low", 
+    cellID > 500 & cellID.hor > 500 ~ "low", 
+    cellID < 100 ~ "low", cellID > 500 ~"low", 
+    cellID.hor < 100 ~ "low", cellID.hor > 500 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.BET == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, #here is the change
+                          ab.BET == "low" ~ rBET)) %>%
+  
+  #high ray abundance in north west, as mob. mobular Lezama-Ochoa 2020
+  mutate(ab.RAY = case_when(
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (3:6) ~ "high",
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (1:2) ~ "normal",
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (7:12) ~ "normal",
+    cellID < 300 & cellID.hor < 1000 ~ "normal", 
+    cellID < 300 & cellID.hor > 1226 ~ "normal", 
+    cellID > 800 & cellID.hor < 1000 ~ "normal", 
+    cellID > 800 & cellID.hor > 1226 ~ "normal", 
+    cellID < 300 ~ "normal", cellID > 800 ~"normal", 
+    cellID.hor < 1000 ~ "normal", cellID.hor > 1226 ~ "normal")) %>% 
+  mutate(rRAY = case_when(ab.RAY == "normal" ~ rRAY, 
+                          ab.RAY == "high" ~ rRAY + 3))
+```
+
+```{r, echo=FALSE}
+#BET
+for(j in c(1,2,3,11)){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rBET/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rBET Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rBET catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 and 11 high abundance"))}
+
+#YFT
+for(j in 1:3){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rYFT/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rYFT Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rYFT catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 high abundance"))}
+
+#FAL
+for(j in 9:12){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rFAL)), alpha = 0.5, col = "forestgreen")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rFAL abundance indice"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rFAL abundance", subtitle = paste("Month", j), caption = "Months of interest: 9-12 high abundance"))}
+
+#RAY
+for(j in 3:6){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rRAY)), alpha = 0.5, col = "darkmagenta")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rRAY abundance indice"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rRAY abundance", subtitle = paste("Month", j), caption = "Months of interest: 3-6 high abundance"))}
+```
+
+## SOM analysis
+### SOM parameters
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.mixed[,7:11]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 10000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 10'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[treecut$labels])
+add.cluster.boundaries(som, treecut$labels)}
+
+#also view heat maps
+for(j in 1:ncol(data)){{plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.mixed <- df.mixed %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#Boxplots
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#FAL
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rFAL)) + geom_histogram() + geom_histogram(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16))+ labs(title = "rFAL abundance index by cluster", caption = "Simulated dataset") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#RAY
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rRAY)) + geom_histogram() + geom_histogram(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16))+ labs(title = "rRAY abundance index by cluster", caption = "Simulated dataset") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#geographic map
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "Simulated dataset with 8 hotspots", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE))}
+```
+### Extract clusters of interest
+#### For tuna species
+```{r}
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY))
+
+#For vulnerable tuna species: BET and YFT
+##for each species, sort by median and select clusters above highest distance
+###BET
+BET.medians <- df.medians %>% select(cluster.Ward, rBET) %>% 
+  arrange(desc(rBET)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rBET, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- BET.medians[BET.medians$distance == max(BET.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+BET.medians <- BET.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###YFT
+YFT.medians <- df.medians %>% select(cluster.Ward, rYFT) %>% 
+  arrange(desc(rYFT)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rYFT, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- YFT.medians[YFT.medians$distance == max(YFT.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+YFT.medians <- YFT.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##only BET and YFT for first 3 months
+##bind two vectors 
+BET.YFT.medians <- rbind(BET.medians, YFT.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% BET.YFT.medians)
+for(j in 1:3){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High YFT and BET abundance clusters", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+#### For accessory species
+```{r}
+#For vulnerable accessory species: FAL and RAY
+##for each species, sort by median and select clusters above highest distance
+###FAL
+FAL.medians <- df.medians %>% select(cluster.Ward, rFAL) %>%
+  arrange(desc(rFAL)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rFAL, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- FAL.medians[FAL.medians$distance == max(FAL.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+FAL.medians <- FAL.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###RAY
+RAY.medians <- df.medians %>% select(cluster.Ward, rRAY) %>%
+  arrange(desc(rRAY)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rRAY, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- RAY.medians[RAY.medians$distance == max(RAY.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+RAY.medians <- RAY.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##only BET and YFT for first 3 months
+##bind two vectors 
+FAL.RAY.medians <- rbind(FAL.medians, RAY.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% FAL.RAY.medians)
+for(j in 3:11){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High FAL and RAY abundance clusters", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+### Create a vulnerability index by cluster 
+#### For tuna species
+```{r}
+library(scales)
+## For tuna species only
+###set weight factors for each species
+fac.BET <- 4
+fac.YFT <- 3
+fac.SKJ <- 1
+
+#take again this df.median
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.tuna = round((fac.BET*rBET + fac.YFT*rYFT + rSKJ)/((fac.BET+fac.YFT+fac.SKJ)*1000))) %>%
+  mutate(vulnerability.tuna = round(rescale(vulnerability.tuna, c(1,10)))) %>% #rescale to have values between 1 and 10
+  arrange(desc(vulnerability.tuna)) %>%#arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.tuna) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#replot boxplots with vulnerability colors
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.tuna)), pch = 15) + scale_colour_manual(values = rev(Vulnerability.col[1:10]), breaks = c(1:10), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of tuna species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability", subtitle = "Tuna species")))}
+```
+
+#### For accessory species
+```{r}
+##For accessory species
+#set weight factors for each species
+fac.FAL <- 3
+fac.RAY <- 2
+
+##create column
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.accessory = (fac.FAL*rFAL+fac.RAY*rRAY)) %>% #rFal a little more since more often bycaught
+  mutate(vulnerability.accessory = round(rescale(vulnerability.accessory, c(1,10)))) %>% #rescale to have values between 0 and 10
+  arrange(desc(vulnerability.accessory)) %>% #arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.accessory) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.accessory)), pch = 15) + scale_colour_manual(breaks = c(1:10),values = rev(Vulnerability.col[1:10]), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of accessory species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability")))}
+```
+
+# Exactly the same as above, only RAY hotspot @month3-6 is now a BET hotspot (+15t)
+## visualise position and create dataset
+```{r}
+#create datasete
+df.mixed <- df.random %>% 
+  #create rRay column first
+  mutate(rRAY = round(rtruncnorm(n = nrow(df.cells), a = 0, b = 6, mean = 1.5, sd = 1), 0)) %>%
+  #high abundance cluster BET + YFT, months 1-3
+  mutate(ab.both = case_when(
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (1:3) ~ "high",
+    cellID %in% (400:700) & cellID.hor %in% (400:700) & TimePeriodID %in% (4:12) ~ "low",
+    cellID < 400 & cellID.hor < 400 ~ "low", 
+    cellID < 400 & cellID.hor > 700 ~ "low", 
+    cellID > 700 & cellID.hor < 400 ~ "low", 
+    cellID > 700 & cellID.hor > 700 ~ "low", 
+    cellID < 400 ~ "low", cellID > 700 ~"low", 
+    cellID.hor < 400 ~ "low", cellID.hor > 700 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.both == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2, 
+                          ab.both == "low" ~ rBET),
+         rYFT = case_when(ab.both == "high" ~ rYFT + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="YFT"]*2, 
+                          ab.both == "low" ~ rYFT)) %>%
+  
+  #high FAL abundance along the coast
+  mutate(ab.FAL = case_when(
+    cellID %in% (700:1200) & cellID.hor %in% (700:1200) & TimePeriodID %in% (9:12) ~ "high",
+    cellID %in% (700:1200) & cellID.hor %in% (700:1200) & TimePeriodID %in% (1:8) ~ "normal",
+    cellID < 700 & cellID.hor < 700 ~ "normal", 
+    cellID < 700 & cellID.hor > 1200 ~ "normal", 
+    cellID > 1200 & cellID.hor < 700 ~ "normal", 
+    cellID > 1200 & cellID.hor > 1200 ~ "normal", 
+    cellID < 700 ~ "normal", cellID > 1200 ~"normal", 
+    cellID.hor < 700 ~ "normal", cellID.hor > 1200 ~ "normal")) %>% 
+  mutate(rFAL = case_when(ab.FAL == "normal" ~ rFAL, 
+                          ab.FAL == "high" ~ rFAL + 3)) %>%
+  
+  #high abundance BET month 11
+  mutate(ab.BET = case_when(
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (11) ~ "high",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (1:10) ~ "low",
+    cellID %in% (100:500) & cellID.hor %in% (100:500) & TimePeriodID %in% (12) ~ "low",
+    cellID < 100 & cellID.hor < 100 ~ "low", 
+    cellID < 100 & cellID.hor > 500 ~ "low", 
+    cellID > 500 & cellID.hor < 100 ~ "low", 
+    cellID > 500 & cellID.hor > 500 ~ "low", 
+    cellID < 100 ~ "low", cellID > 500 ~"low", 
+    cellID.hor < 100 ~ "low", cellID.hor > 500 ~ "low")) %>% 
+  mutate(rBET = case_when(ab.BET == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*3, #here is the change
+                          ab.BET == "low" ~ rBET)) %>%
+  
+  #high ray abundance in north west, as mob. mobular Lezama-Ochoa 2020 --> turns to BET hotspot
+  mutate(ab.RAY = case_when(
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (3:6) ~ "high",
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (1:2) ~ "normal",
+    cellID %in% (300:800) & cellID.hor %in% (1000:1226) & TimePeriodID %in% (7:12) ~ "normal",
+    cellID < 300 & cellID.hor < 1000 ~ "normal", 
+    cellID < 300 & cellID.hor > 1226 ~ "normal", 
+    cellID > 800 & cellID.hor < 1000 ~ "normal", 
+    cellID > 800 & cellID.hor > 1226 ~ "normal", 
+    cellID < 300 ~ "normal", cellID > 800 ~"normal", 
+    cellID.hor < 1000 ~ "normal", cellID.hor > 1226 ~ "normal")) %>% 
+  mutate(rBET = case_when(ab.RAY == "normal" ~ rBET, 
+                          ab.RAY == "high" ~ rBET + ICCATsummary$numeric.mean[ICCATsummary$skim_variable=="BET"]*2)) #here is the change
+```
+
+```{r, echo=FALSE}
+#BET
+for(j in c(1,2,3,11)){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rBET/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rBET Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rBET catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 and 11 high abundance"))}
+
+#YFT
+for(j in 1:3){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rYFT/1000)), alpha = 0.5, col = "midnightblue")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rYFT Catch (t)"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rYFT catches", subtitle = paste("Month", j), caption = "Months of interest: 1-3 high abundance"))}
+
+#FAL
+for(j in 9:12){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rFAL)), alpha = 0.5, col = "forestgreen")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rFAL abundance indice"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rFAL abundance", subtitle = paste("Month", j), caption = "Months of interest: 9-12 high abundance"))}
+
+#RAY
+for(j in 3:6){
+  print(ggplot() + geom_point(data = df.mixed[df.mixed$TimePeriodID==j,], aes(x = xLon, y=yLat, size = (rRAY)), alpha = 0.5, col = "darkmagenta")+
+  geom_sf(data=world) + labs(x = "longitude",y ="latitude") +
+ coord_sf(xlim= c(-40,15), ylim = c(-25,25))+ theme_minimal()+
+   theme(axis.text = element_text(size=10), axis.title = element_text(size = 12), legend.text = element_text(size=10), legend.title = element_text(size=10), legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=14))+
+    guides(size = guide_legend(title ="rRAY abundance indice"))+
+  scale_size(range = c(0.1,4)) +
+  labs(title = "rRAY abundance", subtitle = paste("Month", j), caption = "Months of interest: 3-6 high abundance"))}
+```
+
+## SOM analysis
+### SOM parameters
+```{r, echo=TRUE}
+#get data in matrix shape
+data <- df.mixed[,7:11]
+data <- data.matrix(data)
+data <- scale(data, center = T, scale = T)
+
+#calculate grid parameters
+grid.size <- ceiling((nrow(data) ^ (1/2))*5)
+svd.data <- svd(data)
+svd1 <- svd.data$d[1]
+svd2 <- svd.data$d[2]
+y <- round(sqrt(grid.size*svd2/svd1))
+x <- round(svd1/svd2*y)
+```
+
+### SOM training and output visualisation
+```{r, echo=TRUE}
+#fit som
+set.seed(1000)
+som <- som(data, grid = somgrid(x,y, "hexagonal"), rlen = 10000)
+```
+
+```{r, echo=FALSE}
+#Changes plot
+plot(som, type = "changes", main = "rlen 10'000")
+
+#count plot --> cells will be colored according to the number of units corresponding
+plot(som, type = "count", palette.name = coolBlueHotRed, shape = "straight")
+
+#codes plot
+plot(som, shape = "straight", type = "codes", codeRendering = "segments")
+
+#Neighbour distance plot (D-Matrix, euclidean distance between codebook vectors of neighboring neurons is depicted in a range of colors)
+plot(som, type = "dist.neighbours", shape = "straight")
+#plot(som.season1, type = "codes", codeRendering = "segments")
+
+#Heat maps
+for(j in 1:ncol(data)){plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")}
+```
+
+### Clustering using hclust + dynamicTreeCut and descriptive statistics
+```{r, echo=TRUE}
+#distance matrix between the cells
+dc <- dist(getCodes(som))
+
+#Dendrogram
+dendrogram <- hclust(dc,method="ward.D2")
+plot(dendrogram,hang=-1,labels=F)
+
+#DynamicTreeCut
+dc <- as.matrix(dc)
+treecut <- cutreeHybrid(dendrogram, distM = dc)
+{plot(som, type = "codes", codeRendering = "", shape = "straight", bgcol = Clusters.col[treecut$labels])
+add.cluster.boundaries(som, treecut$labels)}
+
+#also view heat maps
+for(j in 1:ncol(data)){{plot(som, type = "property", property = getCodes(som)[,j], main=colnames(getCodes(som))[j], palette.name=coolBlueHotRed, shape = "straight")
+  add.cluster.boundaries(som, treecut$labels)}}
+
+#incorporate cluster assignation to dataset
+clusters <- as_tibble(treecut$labels) %>% rowid_to_column(var = "node") %>% mutate(cluster.Ward = value) %>% select(-value)
+nodes <- as_tibble(som$unit.classif) %>% rowid_to_column(var = "obsID") %>% mutate(node = value) %>% select(-value)
+clusters <- inner_join(nodes, clusters, by = "node")
+df.mixed <- df.mixed %>% inner_join(clusters, by = "obsID")
+```
+
+```{r, echo=FALSE}
+#Boxplots
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+##SKJ
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rSKJ)) + geom_boxplot(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + labs(title = "SKJ by cluster",  subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#FAL
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rFAL)) + geom_histogram() + geom_histogram(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16))+ labs(title = "rFAL abundance index by cluster", caption = "Simulated dataset") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#RAY
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rRAY)) + geom_histogram() + geom_histogram(aes(fill = as.factor(cluster.Ward))) + scale_fill_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16))+ labs(title = "rRAY abundance index by cluster", caption = "Simulated dataset") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Clusters"))
+
+#geographic map
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "Simulated dataset with 8 hotspots", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE))}
+```
+
+### Extract clusters of interest
+#### For tuna species
+```{r}
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY))
+
+#For vulnerable tuna species: BET and YFT
+##for each species, sort by median and select clusters above highest distance
+###BET
+BET.medians <- df.medians %>% select(cluster.Ward, rBET) %>% 
+  arrange(desc(rBET)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rBET, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- BET.medians[BET.medians$distance == max(BET.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+BET.medians <- BET.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###YFT
+YFT.medians <- df.medians %>% select(cluster.Ward, rYFT) %>% 
+  arrange(desc(rYFT)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rYFT, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- YFT.medians[YFT.medians$distance == max(YFT.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+YFT.medians <- YFT.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##only BET and YFT for first 3 months
+##bind two vectors 
+BET.YFT.medians <- rbind(BET.medians, YFT.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% BET.YFT.medians)
+for(j in 1:3){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High YFT and BET abundance clusters", caption = "clustering: hclust + cuTreeHybrid, Ward", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+#### For accessory species
+```{r}
+#For vulnerable accessory species: FAL and RAY
+##for each species, sort by median and select clusters above highest distance
+###FAL
+FAL.medians <- df.medians %>% select(cluster.Ward, rFAL) %>%
+  arrange(desc(rFAL)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rFAL, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- FAL.medians[FAL.medians$distance == max(FAL.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+FAL.medians <- FAL.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+###RAY
+RAY.medians <- df.medians %>% select(cluster.Ward, rRAY) %>%
+  arrange(desc(rRAY)) %>% rownames_to_column("rank") %>% mutate(rank = as.integer(rank)) %>%
+  mutate(distance = ave(rRAY, FUN = function(x) -c(0,diff(x))))
+
+####select all clusters above max(distance)
+limit.rank <- RAY.medians[RAY.medians$distance == max(RAY.medians$distance),] %>% select(rank) %>% unlist() %>% as.double()
+RAY.medians <- RAY.medians %>% filter(rank < limit.rank) %>% select(cluster.Ward) %>% as.matrix()
+
+##only BET and YFT for first 3 months
+##bind two vectors 
+FAL.RAY.medians <- rbind(FAL.medians, RAY.medians)
+df.visual <- df.mixed %>% filter(cluster.Ward %in% FAL.RAY.medians)
+for(j in 3:11){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.visual[df.visual$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(cluster.Ward)), pch = 15) + 
+          scale_colour_manual(breaks = c(1:16), values = Clusters.col, labels = c(1:16)) + 
+          theme_bw() + labs(title = "High FAL and RAY abundance clusters", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Clusters")))}
+```
+
+### Create a vulnerability index by cluster 
+#### For tuna species
+```{r}
+library(scales)
+## For tuna species only
+###set weight factors for each species
+fac.BET <- 4
+fac.YFT <- 3
+fac.SKJ <- 1
+
+#take again this df.median
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.tuna = round((fac.BET*rBET + fac.YFT*rYFT + rSKJ)/((fac.BET+fac.YFT+fac.SKJ)*1000))) %>%
+  mutate(vulnerability.tuna = round(rescale(vulnerability.tuna, c(1,10)))) %>% #rescale to have values between 1 and 10
+  arrange(desc(vulnerability.tuna)) %>%#arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.tuna) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#replot boxplots with vulnerability colors
+##BET
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rBET)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "BET by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+##YFT
+ggplot(data=df.mixed, aes(group = cluster.Ward, y=rYFT)) + geom_boxplot(aes(fill = as.factor(vulnerability.tuna))) + scale_fill_manual(breaks = c(1:10), values = rev(Vulnerability.col), labels = c(1:10)) + labs(title = "YFT by cluster", subtitle = "Ward") + theme_minimal() +
+  theme(axis.text = element_text(size=9), axis.title = element_text(size = 10), 
+        legend.text = element_text(size=10), legend.title = element_text(size=10), 
+        legend.key.size = unit(0.4, "cm"), plot.title = element_text(size=12), legend.position = "bottom",
+        plot.caption = element_text(hjust = 0, size = 9, face = "italic"))+
+  guides(fill = guide_legend(title ="Vulnerability"))
+
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.tuna)), pch = 15) + scale_colour_manual(values = rev(Vulnerability.col[1:10]), breaks = c(1:10), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of tuna species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability", subtitle = "Tuna species")))}
+```
+
+#### For accessory species
+```{r}
+##For accessory species
+#set weight factors for each species
+fac.FAL <- 3
+fac.RAY <- 2
+
+##create column
+df.medians <- df.mixed %>% group_by(cluster.Ward) %>% summarise(rBET = median(rBET), rYFT = median(rYFT), rSKJ = median(rSKJ), rFAL = median(rFAL), rRAY = median(rRAY)) %>% #create tuna vulnerability index by column
+  mutate(vulnerability.accessory = (fac.FAL*rFAL+fac.RAY*rRAY)) %>% #rFal a little more since more often bycaught
+  mutate(vulnerability.accessory = round(rescale(vulnerability.accessory, c(1,10)))) %>% #rescale to have values between 0 and 10
+  arrange(desc(vulnerability.accessory)) %>% #arrange clusters by vulnerability
+  select(cluster.Ward, vulnerability.accessory) #select only 2 columns of interest
+
+#bind this vulnerability value to complete dataframe for plotting catches on map
+df.mixed <- df.mixed %>% inner_join(df.medians, by = "cluster.Ward")
+
+#plot maps with color based on vulnerability in r
+for(j in 1:12){
+  print(ggplot() + geom_sf(data = world) + geom_point(data = df.mixed[df.mixed$TimePeriodID == j,], aes(x = xLon, y = yLat, color = as.factor(vulnerability.accessory)), pch = 15) + scale_colour_manual(breaks = c(1:10),values = rev(Vulnerability.col[1:10]), labels = (1:10)) + theme_bw() + labs(title = "Simulated dataset, vulnerability of accessory species", subtitle = paste("Month", j)) + coord_sf(xlim = c(-40,20), ylim = c(-25,25), expand = FALSE)+ guides(colour = guide_legend(title ="Vulnerability")))}
+```
